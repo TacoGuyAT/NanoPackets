@@ -21,6 +21,7 @@ public partial class TestServer : NetworkServerBase<World, Player, Player, NetPl
 public partial class TestClient : NetworkClientBase<World, Player, Player, NetPlayer> {
     public TestClient(World world, IClient transport, string addr) : base(world, transport, addr) { }
 
+    protected override void OnDisconnect(DisconnectCode code, string reason) { }
 }
 
 public class World : IWorld<Player> {

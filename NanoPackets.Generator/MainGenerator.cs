@@ -28,6 +28,8 @@ public class MainGenerator : IIncrementalGenerator {
         var assemblies = context.CompilationProvider.Select((x, _) => x);
         context.RegisterSourceOutput(assemblies, static (ctx, src) => {
             extensions = string.Empty;
+            MainGenerator.client = null;
+            MainGenerator.server = null;
             serverBases.Clear();
             clientBases.Clear();
             serverHandlers.Clear();
@@ -209,7 +211,7 @@ public class MainGenerator : IIncrementalGenerator {
 
         var source = new StringBuilder();
 
-        source.AppendLine($"namespace NanoPackets.Data;");
+        source.AppendLine($"namespace NanoPackets;");
         source.AppendLine($"public enum PacketId {{");
         foreach(var packet in packets) {
             var id = packet.StructIdent.EndsWith("Packet") ? packet.StructIdent[..^6] : packet.StructIdent;
@@ -224,7 +226,7 @@ public class MainGenerator : IIncrementalGenerator {
         source.AppendLine($"    Unknown");
         source.AppendLine($"}}");
 
-        context.AddSource($"NanoPackets.Data.PacketId.g.cs", source.ToString());
+        context.AddSource($"NanoPackets.PacketId.g.cs", source.ToString());
 
         if(client == null || server == null) {
             throw new Exception("Client or server are not defined");
@@ -283,6 +285,7 @@ public class MainGenerator : IIncrementalGenerator {
             Location = _class.GetLocation(),
             ClassIdent = _class.Identifier.Text,
         };
+
         result.ClassLine = $"{_class.Modifiers.ToFullString()}" +
             $"{_class.Keyword.ToFullString()}" +
             $"{result.ClassIdent}{(_class.TypeParameterList is null ? "" : _class.TypeParameterList.ToString())} " +
@@ -357,7 +360,7 @@ public class MainGenerator : IIncrementalGenerator {
 
     private static bool IsPacket(SyntaxNode s)
         => s is StructDeclarationSyntax _struct && 
-        _struct.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) && 
+        _struct.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) && // TODO: Report missing partial keyword diagnostics
         _struct.AttributeLists.Any(x => x.Attributes.Any(x => x.Name.ToString() == "Packet"));
 
     private static PacketInformation PacketTransform(GeneratorSyntaxContext ctx) {
@@ -375,6 +378,7 @@ public class MainGenerator : IIncrementalGenerator {
                         x.AttributeLists.Any(x => x.Attributes.Any(x => x.Name.ToString() == "TransferExplicit"))
                     ))),
                 StructIdent = _struct.Identifier.Text,
+                // TODO: Check for interface and report diagnostics; there's more room for improvement afterwards
                 Clientbound = methods.FirstOrDefault(x => x.Identifier.Text == "Clientbound")?.ParameterList.Parameters.First().Type!.ToString(),
                 Serverbound = methods.FirstOrDefault(x => x.Identifier.Text == "Serverbound")?.ParameterList.Parameters.First().Type!.ToString(),
             };

@@ -1,4 +1,4 @@
-﻿namespace NanoPackets.Data;
+﻿namespace NanoPackets;
 
 public enum DisconnectCode : byte {
     None = 0,

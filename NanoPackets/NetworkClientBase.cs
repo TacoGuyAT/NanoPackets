@@ -1,5 +1,4 @@
-﻿using NanoPackets.Data;
-using Riptide;
+﻿using Riptide;
 using Riptide.Transports;
 using Riptide.Utils;
 
@@ -60,5 +59,5 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
         Client.Disconnect();
     }
 
-    protected virtual void OnDisconnect(DisconnectCode code, string reason) { }
+    protected abstract void OnDisconnect(DisconnectCode code, string reason);
 }

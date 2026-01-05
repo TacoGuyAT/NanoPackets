@@ -78,7 +78,7 @@ public static class Extensions {
     public static T[] GetVarULongs<T>(this Message msg) where T : IBinaryInteger<T> {
         var len = (int)msg.GetVarULong();
         var array = new T[len];
-        for(int i = 0; i < len; i++) {
+        for(var i = 0; i < len; i++) {
             array[i] = T.CreateChecked(msg.GetVarULong());
         }
         return array;
@@ -94,7 +94,7 @@ public static class Extensions {
     public static T[] GetVarLongs<T>(this Message msg) where T : IBinaryInteger<T> {
         var len = (int)msg.GetVarULong();
         var array = new T[len];
-        for(int i = 0; i < len; i++) {
+        for(var i = 0; i < len; i++) {
             array[i] = T.CreateChecked(msg.GetVarLong());
         }
         return array;

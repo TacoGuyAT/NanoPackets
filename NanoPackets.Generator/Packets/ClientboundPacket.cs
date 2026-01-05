@@ -1,6 +1,5 @@
 using Riptide;
 using NanoPackets;
-using NanoPackets.Data;
 using System.Runtime.CompilerServices;
 
 namespace NanoPackets.Packets;

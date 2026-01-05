@@ -1,5 +1,4 @@
-﻿using NanoPackets.Utils;
-using Riptide;
+﻿using Riptide;
 
 namespace NanoPackets;
 public partial interface INetObject {

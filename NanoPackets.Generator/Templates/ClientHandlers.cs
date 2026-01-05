@@ -1,7 +1,7 @@
 ﻿using System;
 using Riptide;
 using Riptide.Utils;
-using NanoPackets.Data;
+using NanoPackets;
 /* CLASS_LINE */{
     public override void HandlePacket(ushort msgId, Message msg, int playerId) {
         Action<Message, NetworkClient, int>? method = (PacketId)msgId switch {
