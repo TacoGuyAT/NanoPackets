@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Godot": {
+      "commandName": "DebugRoslynComponent",
+      "targetProject": "..\\..\\..\\..\\..\\..\\GodotProjects\\northside\\Northside.csproj"
+    },
+    "Example": {
+      "commandName": "DebugRoslynComponent",
+      "targetProject": "..\\NanoPackets.Example\\NanoPackets.Example.csproj"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+﻿<Project Sdk="Godot.NET.Sdk/4.5.1">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="RiptideNetworking.Riptide" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NanoPackets\NanoPackets.csproj" />
+  </ItemGroup>
+
+</Project>
