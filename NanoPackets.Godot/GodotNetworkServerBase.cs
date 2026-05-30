@@ -10,7 +10,7 @@ public abstract class GodotNetworkServerBase<TWorld, TPlayerBase, TPlayer, TNetP
 {
     [Export]
     protected PackedScene NewServerPlayer;
-    protected GodotNetworkServerBase(TWorld world, IServer transport, ushort port) : base(world, transport, port) { }
+    protected GodotNetworkServerBase(TWorld world, IServer transport, ushort port, ushort maxClientCount = 10) : base(world, transport, port, maxClientCount) { }
     protected override TNetPlayer NewPlayer(ushort id) {
         var newPlayer = NewServerPlayer.Instantiate<TNetPlayer>();
         Players.Add(id, newPlayer);
