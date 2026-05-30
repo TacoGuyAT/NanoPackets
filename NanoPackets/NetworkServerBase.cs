@@ -13,7 +13,7 @@ public abstract class NetworkServerBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
     protected Dictionary<ushort, Dictionary<ushort, Message>> reliableMessages = [];
     protected Dictionary<Message, int> messagesReferenceCount = [];
     public Server Server => (Server)Peer;
-    public NetworkServerBase(TWorld world, IServer transport, ushort port) : base(world, new Server(transport)) {
+    public NetworkServerBase(TWorld world, IServer transport, ushort port, ushort maxClientCount = 10) : base(world, new Server(transport)) {
         Players.Add(-1, world.Player);
 
         Server.ClientConnected += (s, e) => {
@@ -58,14 +58,17 @@ public abstract class NetworkServerBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
             };
         };
         Server.ClientDisconnected += (s, e) => {
-            Players.Remove(e.Client.Id, out var p);
-            ((TNetPlayer)p!)!.NetHandleDisconnect(); // TODO: handle null and cast? should be impossible to hit
+            // The local/host player lives at key -1 and is a TPlayer, not necessarily a TNetPlayer;
+            // only notify entries that are actually networked players to avoid an invalid cast.
+            if(Players.Remove(e.Client.Id, out var p) && p is TNetPlayer netPlayer) {
+                netPlayer.NetHandleDisconnect();
+            }
         };
         Server.MessageReceived += (s, e) => {
             HandlePacket(e.MessageId, e.Message, e.FromConnection.Id);
         };
 
-        Server.Start(port, 1, 0, false);
+        Server.Start(port, maxClientCount, 0, false);
     }
 
     public abstract void HandlePacket(ushort msgId, Message msg, ushort playerId);

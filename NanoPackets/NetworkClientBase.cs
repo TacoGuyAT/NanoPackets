@@ -12,8 +12,11 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
     protected Dictionary<ushort, Message> reliableMessages = [];
     public NetworkClientBase(TWorld world, IClient transport, string addr) : base(world, new Client(transport)) {
         Client.ClientDisconnected += (s, e) => {
-            Players.Remove(e.Id, out var p);
-            ((TNetPlayer)p!)!.NetHandleDisconnect(); // TODO: handle null and cast? should be impossible to hit
+            // Only networked players (TNetPlayer) get the disconnect callback; the local player is a
+            // plain TPlayer and must not be force-cast.
+            if(Players.Remove(e.Id, out var p) && p is TNetPlayer netPlayer) {
+                netPlayer.NetHandleDisconnect();
+            }
         };
         Client.MessageReceived += (s, e) => {
             HandlePacket(e.MessageId, e.Message, -1);
