@@ -25,12 +25,12 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
                 reliableMessages.Remove(id);
             };
             Client.Connection.NotifyLost += (id) => {
-                if(reliableMessages.TryGetValue(id, out var msg)) {
+                // Always drop the old sequence id: on a reliable resend Send() re-registers the
+                // message under a new id, so leaving the old entry in place leaked it.
+                if(reliableMessages.Remove(id, out var msg)) {
                     msg.GetVarULong();
                     if(msg.GetBool()) {
                         Send(msg);
-                    } else {
-                        reliableMessages.Remove(id);
                     }
                 }
             };
