@@ -1,6 +1,11 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 
 namespace NanoPackets.Generator.Data;
+
+public enum NetworkKind {
+    Server,
+    Client,
+}
 
 public struct NetworkInformation {
     public string Usings;
@@ -8,4 +13,5 @@ public struct NetworkInformation {
     public string ClassLine;
     public string ClassIdent;
     public Location Location;
+    public NetworkKind Kind;
 }

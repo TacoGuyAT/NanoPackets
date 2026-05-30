@@ -1,4 +1,4 @@
-﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using NanoPackets.Generator.Data;
@@ -14,156 +14,351 @@ namespace NanoPackets.Generator;
 
 [Generator]
 public class MainGenerator : IIncrementalGenerator {
-    static NetworkTypeInformation? server = null;
-    static NetworkTypeInformation? client = null;
-    static HashSet<string> serverBases = new();
-    static HashSet<string> clientBases = new();
-    static HashSet<string> serverHandlers = new();
-    static HashSet<string> clientHandlers = new();
-    static HashSet<string> packetNamespaces = new();
-    static Dictionary<string, string> typeNameExtensions = new();
-    static string extensions = string.Empty;
+    // NOTE: This generator intentionally holds NO mutable static state. Everything discovered is
+    // threaded through the incremental pipeline as values and merged into a single source-output
+    // step, so every emitted file sees a complete, consistent snapshot regardless of the order in
+    // which Roslyn runs the pipeline (the previous static-field design produced empty handler
+    // switches / missing usings depending on that order, and leaked state between projects).
+
+    static readonly DiagnosticDescriptor MultipleServers = new(
+        "NP0001", "Multiple server definitions",
+        "Multiple servers can't be defined in the same assembly", "codegen", DiagnosticSeverity.Error, true);
+    static readonly DiagnosticDescriptor MultipleClients = new(
+        "NP0002", "Multiple client definitions",
+        "Multiple clients can't be defined in the same assembly", "codegen", DiagnosticSeverity.Error, true);
+    static readonly DiagnosticDescriptor MissingServer = new(
+        "NP0003", "Couldn't find server",
+        "Generator failed to find a server in the current project", "codegen", DiagnosticSeverity.Error, true);
+    static readonly DiagnosticDescriptor MissingClient = new(
+        "NP0004", "Couldn't find client",
+        "Generator failed to find a client in the current project", "codegen", DiagnosticSeverity.Error, true);
+    static readonly DiagnosticDescriptor PacketWithoutFields = new(
+        "NP0005", "Packet has no serializable fields",
+        "Packet '{0}' has no public, non-const fields and will be skipped", "codegen", DiagnosticSeverity.Warning, true);
+    static readonly DiagnosticDescriptor PacketNotPartial = new(
+        "NP0006", "Packet must be partial",
+        "Packet '{0}' must be declared 'partial' for serialization code to be generated", "codegen", DiagnosticSeverity.Error, true);
 
     public void Initialize(IncrementalGeneratorInitializationContext context) {
-        var assemblies = context.CompilationProvider.Select((x, _) => x);
-        context.RegisterSourceOutput(assemblies, static (ctx, src) => {
-            extensions = string.Empty;
-            MainGenerator.client = null;
-            MainGenerator.server = null;
-            serverBases.Clear();
-            clientBases.Clear();
-            serverHandlers.Clear();
-            clientHandlers.Clear();
-            packetNamespaces.Clear();
-            typeNameExtensions.Clear();
-
-            foreach(var x in src.ExternalReferences.Where(x => x.Display?.Contains("NanoPackets") ?? false)) {
-                if(src.GetAssemblyOrModuleSymbol(x) is IAssemblySymbol symbol) {
-                    LookForImplementations(symbol.GlobalNamespace);
-                }
-            }
-            return;
-        });
-
         var packets = context.SyntaxProvider
             .CreateSyntaxProvider(
-                predicate: static (s, _) => IsPacket(s),
-                transform: static (ctx, _) => PacketTransform(ctx)
-            );
+                predicate: static (s, _) => IsPacketCandidate(s),
+                transform: static (ctx, _) => PacketTransform(ctx))
+            .Where(static x => x is not null)
+            .Select(static (x, _) => x!.Value);
 
-        var client = context.SyntaxProvider
+        var networks = context.SyntaxProvider
             .CreateSyntaxProvider(
-                predicate: static (s, _) => IsClient(s),
-                transform: static (ctx, _) => NetworkTransform(ctx)
-            );
+                predicate: static (s, _) => IsNetworkCandidate(s),
+                transform: static (ctx, _) => NetworkTransform(ctx))
+            .Where(static x => x is not null)
+            .Select(static (x, _) => x!.Value);
 
-        var server = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                predicate: static (s, _) => IsServer(s),
-                transform: static (ctx, _) => NetworkTransform(ctx)
-            );
+        var extensions = context.CompilationProvider.Select(static (c, _) => CollectExtensions(c));
 
-        context.RegisterSourceOutput(packets, ProcessPacket);
-        context.RegisterSourceOutput(server, ProcessServer);
-        context.RegisterSourceOutput(client, ProcessClient);
-        context.RegisterSourceOutput(packets.Select((x, _) => x).Collect(), GeneratePackets);
-        context.RegisterSourceOutput(server, GeneratePartialServer);
-        context.RegisterSourceOutput(client, GeneratePartialClient);
+        var combined = packets.Collect()
+            .Combine(networks.Collect())
+            .Combine(extensions);
+
+        context.RegisterSourceOutput(combined, static (ctx, data) =>
+            Emit(ctx, data.Left.Left, data.Left.Right, data.Right));
     }
 
-    private void GeneratePartialServer(SourceProductionContext context, NetworkInformation info) {
-        if(server == null) {
-            context.ReportDiagnostic(
-                Diagnostic.Create(new DiagnosticDescriptor(
-                    "NP0003",
-                    "Couldn't find server",
-                    "Generator failed to find server in the current project",
-                    "codegen",
-                    DiagnosticSeverity.Error,
-                    true
-                ), null)
-            );
-            return;
+    // ---- Discovery --------------------------------------------------------------------------
+
+    private static bool IsPacketCandidate(SyntaxNode s)
+        => s is StructDeclarationSyntax _struct &&
+           _struct.AttributeLists.Any(x => x.Attributes.Any(a => a.Name.ToString() == "Packet"));
+
+    private static PacketInformation? PacketTransform(GeneratorSyntaxContext ctx) {
+        var _struct = (StructDeclarationSyntax)ctx.Node;
+        var attr = _struct.AttributeLists
+            .SelectMany(x => x.Attributes)
+            .FirstOrDefault(a => a.Name.ToString() == "Packet");
+        if(attr is null) {
+            return null;
         }
 
-        var usings = info.Usings;
-        string classLines;
-        if(!string.IsNullOrWhiteSpace(server.Value.Namespace)) {
-            usings += $"using {server.Value.Namespace};\n";
-            classLines = $"\nnamespace {server.Value.Namespace};\n{info.ClassLine}";
+        var methods = _struct.Members.OfType<MethodDeclarationSyntax>().ToList();
+
+        var fields = _struct.Members.OfType<FieldDeclarationSyntax>()
+            .Where(x => x.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword)) &&
+                        !x.Modifiers.Any(m => m.IsKind(SyntaxKind.ConstKeyword)))
+            .SelectMany(x => x.Declaration.Variables.Select(t => new FieldInformation(
+                x.Declaration.Type.ToString(),
+                t.Identifier.Text,
+                x.AttributeLists.Any(al => al.Attributes.Any(a => a.Name.ToString() == "TransferExplicit")))))
+            .ToList();
+
+        PacketInformation result = new() {
+            Fields = fields,
+            StructIdent = _struct.Identifier.Text,
+            Partial = _struct.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)),
+            Location = _struct.Identifier.GetLocation(),
+            Clientbound = BoundParameterType(methods, "Clientbound"),
+            Serverbound = BoundParameterType(methods, "Serverbound"),
+        };
+
+        if(attr.ArgumentList is AttributeArgumentListSyntax list && list.Arguments.Count >= 2) {
+            result.Ordered = list.Arguments[0].Expression.IsKind(SyntaxKind.TrueLiteralExpression);
+            result.Reliable = list.Arguments[1].Expression.IsKind(SyntaxKind.TrueLiteralExpression);
+        }
+
+        result.StructLine =
+            $"{_struct.Modifiers.ToFullString()}" +
+            $"{_struct.Keyword.ToFullString()}" +
+            $"{result.StructIdent}{(_struct.TypeParameterList is null ? "" : _struct.TypeParameterList.ToString())} " +
+            $"{(_struct.BaseList != null ? _struct.BaseList.ToFullString() : "")}" +
+            $"{_struct.ConstraintClauses.ToFullString()}";
+
+        (result.Namespace, result.Usings) = ResolveNamespaceAndUsings(_struct);
+        return result;
+    }
+
+    private static string? BoundParameterType(IEnumerable<MethodDeclarationSyntax> methods, string name) {
+        var method = methods.FirstOrDefault(x => x.Identifier.Text == name);
+        var parameters = method?.ParameterList.Parameters;
+        if(parameters is null || parameters.Value.Count == 0) {
+            return null;
+        }
+        return parameters.Value[0].Type?.ToString();
+    }
+
+    private static bool IsNetworkCandidate(SyntaxNode s)
+        => s is ClassDeclarationSyntax _class &&
+           _class.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) &&
+           _class.BaseList is not null;
+
+    private static NetworkInformation? NetworkTransform(GeneratorSyntaxContext ctx) {
+        var _class = (ClassDeclarationSyntax)ctx.Node;
+        if(ctx.SemanticModel.GetDeclaredSymbol(_class) is not INamedTypeSymbol symbol) {
+            return null;
+        }
+
+        NetworkKind? kind = null;
+        for(var baseType = symbol.BaseType; baseType is not null; baseType = baseType.BaseType) {
+            if(baseType.ContainingNamespace?.ToDisplayString() != "NanoPackets") {
+                continue;
+            }
+            if(baseType.Name == "NetworkServerBase") { kind = NetworkKind.Server; break; }
+            if(baseType.Name == "NetworkClientBase") { kind = NetworkKind.Client; break; }
+        }
+        if(kind is null) {
+            return null;
+        }
+
+        NetworkInformation result = new() {
+            Location = _class.GetLocation(),
+            ClassIdent = _class.Identifier.Text,
+            Kind = kind.Value,
+        };
+
+        result.ClassLine =
+            $"{_class.Modifiers.ToFullString()}" +
+            $"{_class.Keyword.ToFullString()}" +
+            $"{result.ClassIdent}{(_class.TypeParameterList is null ? "" : _class.TypeParameterList.ToString())} " +
+            $"{(_class.BaseList != null ? _class.BaseList.ToFullString() : "")}" +
+            $"{_class.ConstraintClauses.ToFullString()}";
+
+        (result.Namespace, result.Usings) = ResolveNamespaceAndUsings(_class);
+        return result;
+    }
+
+    private static (string Namespace, string Usings) ResolveNamespaceAndUsings(SyntaxNode node) {
+        string @namespace = string.Empty;
+        var usings = new StringBuilder();
+
+        var parent = node.Parent;
+        while(parent is not null and not BaseNamespaceDeclarationSyntax) {
+            if(parent.Parent is null) {
+                break;
+            }
+            parent = parent.Parent;
+        }
+
+        if(parent is BaseNamespaceDeclarationSyntax _namespace) {
+            @namespace = _namespace.Name.ToString();
+            if(_namespace.Parent is not null) {
+                AppendUsings(usings, _namespace.Parent.ChildNodes());
+            }
+        } else if(parent is not null) {
+            AppendUsings(usings, parent.ChildNodes());
+        }
+
+        return (@namespace, usings.ToString());
+    }
+
+    private static void AppendUsings(StringBuilder sb, IEnumerable<SyntaxNode> nodes) {
+        foreach(var child in nodes) {
+            if(child is UsingDirectiveSyntax _using) {
+                sb.Append(_using.ToString());
+                sb.Append('\n');
+            }
+        }
+    }
+
+    private static ExtensionInformation CollectExtensions(Compilation compilation) {
+        var usings = new StringBuilder();
+        var typeNameExtensions = new Dictionary<string, string>();
+
+        var assemblies = compilation.References
+            .Where(r => r.Display?.Contains("NanoPackets") ?? false)
+            .Select(compilation.GetAssemblyOrModuleSymbol)
+            .OfType<IAssemblySymbol>()
+            .OrderBy(a => a.Name, StringComparer.Ordinal);
+
+        foreach(var assembly in assemblies) {
+            CollectExtensionsFromNamespace(assembly.GlobalNamespace, usings, typeNameExtensions);
+        }
+
+        return new ExtensionInformation {
+            Usings = usings.ToString(),
+            TypeNameExtensions = typeNameExtensions,
+        };
+    }
+
+    private static void CollectExtensionsFromNamespace(
+        INamespaceSymbol ns, StringBuilder usings, Dictionary<string, string> typeNameExtensions) {
+        foreach(var type in ns.GetTypeMembers().Where(t => t.Name == "Extensions")) {
+            var methods = type.GetMembers()
+                .OfType<IMethodSymbol>()
+                .Where(m => m.Parameters.Length == 2 && m.Name != "Add" && !m.Parameters[1].Type.Name.EndsWith("[]"))
+                .OrderBy(m => m.Name, StringComparer.Ordinal);
+            foreach(var method in methods) {
+                var key = method.Parameters[1].Type.Name;
+                if(!typeNameExtensions.ContainsKey(key)) {
+                    typeNameExtensions.Add(key, method.Name.Substring(3));
+                }
+            }
+            usings.Append($"using {type.ContainingNamespace.ToDisplayString()};\n");
+        }
+
+        foreach(var child in ns.GetNamespaceMembers().OrderBy(n => n.Name, StringComparer.Ordinal)) {
+            CollectExtensionsFromNamespace(child, usings, typeNameExtensions);
+        }
+    }
+
+    // ---- Emission ---------------------------------------------------------------------------
+
+    private static void Emit(
+        SourceProductionContext context,
+        ImmutableArray<PacketInformation> packets,
+        ImmutableArray<NetworkInformation> networks,
+        ExtensionInformation extensions) {
+
+        var servers = networks.Where(n => n.Kind == NetworkKind.Server).ToList();
+        var clients = networks.Where(n => n.Kind == NetworkKind.Client).ToList();
+
+        ReportDuplicates(context, servers, MultipleServers);
+        ReportDuplicates(context, clients, MultipleClients);
+
+        // Validate user packets; emit diagnostics for unusable ones and drop them.
+        var validPackets = new List<PacketInformation>();
+        foreach(var packet in packets) {
+            if(!packet.Partial) {
+                context.ReportDiagnostic(Diagnostic.Create(PacketNotPartial, packet.Location, packet.StructIdent));
+                continue;
+            }
+            if(packet.Fields.Count == 0) {
+                context.ReportDiagnostic(Diagnostic.Create(PacketWithoutFields, packet.Location, packet.StructIdent));
+                continue;
+            }
+            validPackets.Add(packet);
+        }
+
+        // Deterministic ordering: packet identity (and therefore its wire id in the enum) must be
+        // stable across builds and across separately-compiled client/server assemblies.
+        validPackets.Sort((a, b) => string.CompareOrdinal(a.StructIdent, b.StructIdent));
+
+        var internalPackets = typeof(MainGenerator).Assembly
+            .GetManifestResourceNames()
+            .Where(x => x.Contains("NanoPackets.Generator.Packets"))
+            .Select(x => x.Split('.')[^2])
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ToList();
+
+        var serverHandlers = new List<string>();
+        var clientHandlers = new List<string>();
+        var packetNamespaces = new SortedSet<string>(StringComparer.Ordinal);
+
+        // Per-user-packet emission + handler/enum metadata.
+        var enumEntries = new List<string>();
+        foreach(var packet in validPackets) {
+            var id = packet.StructIdent.EndsWith("Packet") ? packet.StructIdent[..^6] : packet.StructIdent;
+            if(!string.IsNullOrWhiteSpace(packet.Namespace)) {
+                packetNamespaces.Add(packet.Namespace);
+            }
+            AddHandler(serverHandlers, clientHandlers, id, packet.StructIdent,
+                clientbound: packet.Clientbound != null, serverbound: packet.Serverbound != null);
+            enumEntries.Add(id);
+            context.AddSource(
+                $"{(string.IsNullOrWhiteSpace(packet.Namespace) ? "" : $"{packet.Namespace}.")}{packet.StructIdent}.g.cs",
+                BuildPacketSource(packet, extensions));
+        }
+
+        packetNamespaces.Add("NanoPackets.Packets");
+
+        var hasServer = servers.Count > 0;
+        var hasClient = clients.Count > 0;
+        if(!hasServer) {
+            context.ReportDiagnostic(Diagnostic.Create(MissingServer, null));
+        }
+        if(!hasClient) {
+            context.ReportDiagnostic(Diagnostic.Create(MissingClient, null));
+        }
+
+        // Internal packets need the concrete server/client type names; only generate them (and the
+        // PacketId enum entries that reference them) when both are present.
+        if(hasServer && hasClient) {
+            var server = servers[0];
+            var client = clients[0];
+
+            var usingString = new StringBuilder(extensions.Usings);
+            if(!string.IsNullOrWhiteSpace(client.Namespace)) {
+                usingString.Append($"using {client.Namespace};\n");
+            }
+            if(!string.IsNullOrWhiteSpace(server.Namespace) && server.Namespace != client.Namespace) {
+                usingString.Append($"using {server.Namespace};\n");
+            }
+
+            foreach(var packet in internalPackets) {
+                var template = ReadManifestString($"NanoPackets.Generator.Packets.{packet}.cs")
+                    .Replace("NetworkClient", client.ClassIdent)
+                    .Replace("NetworkServer", server.ClassIdent);
+                var result = usingString + template;
+                AddHandler(serverHandlers, clientHandlers, packet[..^6], packet,
+                    clientbound: result.Contains("Clientbound("), serverbound: result.Contains("Serverbound("));
+                enumEntries.Add(packet[..^6]);
+                context.AddSource($"NanoPackets.Packets.{packet}.g.cs", result);
+            }
         } else {
-            classLines = $"\n{info.ClassLine}";
-        }
-
-        foreach(var x in packetNamespaces) {
-            if(x != null && !usings.Contains(x)) {
-                usings += $"using {x};\n";
+            // Still surface the internal packets in the enum so downstream references resolve.
+            foreach(var packet in internalPackets) {
+                enumEntries.Add(packet[..^6]);
             }
         }
 
-        var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("NanoPackets.Generator.Templates.Broadcast.cs");
-        var data = new byte[stream.Length];
-        var memoryStream = new MemoryStream(data);
-        stream.CopyTo(memoryStream);
+        context.AddSource("NanoPackets.PacketId.g.cs", BuildEnum(enumEntries));
 
-        var split = Encoding.UTF8.GetString(data).Split(["/* CLASS_LINE */"], StringSplitOptions.None);
-        usings += split[0];
-        var result = usings + classLines + split[1];
-        context.AddSource($"{(string.IsNullOrWhiteSpace(info.Namespace) ? "" : $"{info.Namespace}.")}{info.ClassIdent}Broadcast.g.cs", result);
-
-        stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("NanoPackets.Generator.Templates.ServerHandlers.cs");
-        data = new byte[stream.Length];
-        memoryStream = new MemoryStream(data);
-        stream.CopyTo(memoryStream);
-
-        split = Encoding.UTF8.GetString(data).Split(["/* CLASS_LINE */"], StringSplitOptions.None);
-        usings += split[0];
-        result = usings + classLines + split[1].Replace("NetworkServer", info.ClassIdent).Replace("/* PACKET_HANDLERS */", string.Join("\n            ", serverHandlers));
-        context.AddSource($"{(string.IsNullOrWhiteSpace(info.Namespace) ? "" : $"{info.Namespace}.")}{info.ClassIdent}Handlers.g.cs", result);
+        if(hasServer && hasClient) {
+            EmitServerPartials(context, servers[0], serverHandlers, packetNamespaces);
+            EmitClientPartials(context, clients[0], clientHandlers, packetNamespaces);
+        }
     }
 
-    private void GeneratePartialClient(SourceProductionContext context, NetworkInformation info) {
-        if(client == null) {
-            context.ReportDiagnostic(
-                Diagnostic.Create(new DiagnosticDescriptor(
-                    "NP0004",
-                    "Couldn't find client",
-                    "Generator failed to find client in the current project",
-                    "codegen",
-                    DiagnosticSeverity.Error,
-                    true
-                ), null)
-            );
+    private static void ReportDuplicates(
+        SourceProductionContext context, List<NetworkInformation> networks, DiagnosticDescriptor descriptor) {
+        if(networks.Select(n => n.ClassIdent).Distinct().Count() <= 1) {
             return;
         }
-
-        var usings = info.Usings;
-        string classLines;
-        if(!string.IsNullOrWhiteSpace(client.Value.Namespace)) {
-            usings += $"using {client.Value.Namespace};\n";
-            classLines = $"\nnamespace {client.Value.Namespace};\n{info.ClassLine}";
-        } else {
-            classLines = $"\n{info.ClassLine}";
+        foreach(var network in networks) {
+            context.ReportDiagnostic(Diagnostic.Create(descriptor, network.Location));
         }
-
-        foreach(var x in packetNamespaces) {
-            if(x != null && !usings.Contains(x)) {
-                usings += $"using {x};\n";
-            }
-        }
-
-        var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("NanoPackets.Generator.Templates.ClientHandlers.cs");
-        var data = new byte[stream.Length];
-        var memoryStream = new MemoryStream(data);
-        stream.CopyTo(memoryStream);
-
-        var split = Encoding.UTF8.GetString(data).Split(["/* CLASS_LINE */"], StringSplitOptions.None);
-        usings += split[0];
-        var result = usings + classLines + split[1].Replace("NetworkClient", info.ClassIdent).Replace("/* PACKET_HANDLERS */", string.Join("\n            ", clientHandlers));
-        context.AddSource($"{(string.IsNullOrWhiteSpace(info.Namespace) ? "" : $"{info.Namespace}.")}{info.ClassIdent}Handlers.g.cs", result);
     }
 
-    static void AddPacketHandler(string packetId, string packet, bool clientbound, bool serverbound) {
+    private static void AddHandler(
+        List<string> serverHandlers, List<string> clientHandlers,
+        string packetId, string packet, bool clientbound, bool serverbound) {
         var line = $"PacketId.{packetId} => {packet}.Read,";
         if(clientbound) {
             clientHandlers.Add(line);
@@ -173,270 +368,87 @@ public class MainGenerator : IIncrementalGenerator {
         }
     }
 
-    static void LookForImplementations(INamespaceSymbol ns) {
-        var types = ns.GetTypeMembers();
-        foreach(var type in types) {
-            if(type.Name == "Extensions") {
-                var me = type
-                    .GetMembers()
-                    .OfType<IMethodSymbol>();
-                foreach(var m in me
-                    .Where(x => x.Parameters.Length == 2 && x.Name != "Add" && !x.Parameters[1].Type.Name.EndsWith("[]"))
-                ) {
-                    if(!typeNameExtensions.ContainsKey(m.Parameters[1].Type.Name)) {
-                        typeNameExtensions.Add(m.Parameters[1].Type.Name, m.Name[3..]);
-                    }
-                }
-                extensions += $"using {type.ContainingNamespace.ToDisplayString()};\n";
-            }
-
-            if(Recursive(type, x => x.Name == "NetworkServerBase", x => x.BaseType)) {
-                serverBases.Add(type.Name);
-                continue;
-            }
-            if(Recursive(type, x => x.Name == "NetworkClientBase", x => x.BaseType)) {
-                clientBases.Add(type.Name);
-                continue;
-            }
-        }
-
-        foreach(var child in ns.GetNamespaceMembers()) {
-            LookForImplementations(child);
-        }
-    }
-
-    public static void GeneratePackets(SourceProductionContext context, ImmutableArray<PacketInformation> packets) {
-        var assembly = Assembly.GetExecutingAssembly();
-        var internalPackets = assembly.GetManifestResourceNames().Where(x => x.Contains("NanoPackets.Generator.Packets")).Select(x => x.Split('.')[^2]);
-
+    private static string BuildEnum(IEnumerable<string> entries) {
         var source = new StringBuilder();
-
-        source.AppendLine($"namespace NanoPackets;");
-        source.AppendLine($"public enum PacketId {{");
-        foreach(var packet in packets) {
-            var id = packet.StructIdent.EndsWith("Packet") ? packet.StructIdent[..^6] : packet.StructIdent;
-            packetNamespaces.Add(packet.Namespace);
-            AddPacketHandler(id, packet.StructIdent, packet.Clientbound != null, packet.Serverbound != null);
-            source.AppendLine($"    {id},");
+        source.AppendLine("namespace NanoPackets;");
+        source.AppendLine("public enum PacketId {");
+        foreach(var entry in entries) {
+            source.AppendLine($"    {entry},");
         }
-        packetNamespaces.Add("NanoPackets.Packets");
-        foreach(var packet in internalPackets) {
-            source.AppendLine($"    {packet[..^6]},");
-        }
-        source.AppendLine($"    Unknown");
-        source.AppendLine($"}}");
-
-        context.AddSource($"NanoPackets.PacketId.g.cs", source.ToString());
-
-        if(client == null || server == null) {
-            throw new Exception("Client or server are not defined");
-        }
-
-        string usingString = extensions;
-        if(!string.IsNullOrWhiteSpace(client.Value.Namespace)) {
-            usingString = $"using {client.Value.Namespace};\n";
-        }
-        if(!string.IsNullOrWhiteSpace(server.Value.Namespace) && client.Value.Namespace != server.Value.Namespace) {
-            usingString += $"using {server.Value.Namespace};\n";
-        }
-
-        foreach(var packet in internalPackets) {
-            var stream = assembly.GetManifestResourceStream($"NanoPackets.Generator.Packets.{packet}.cs");
-            var data = new byte[stream.Length];
-            var memoryStream = new MemoryStream(data);
-            stream.CopyTo(memoryStream);
-
-            var result = usingString + Encoding.UTF8.GetString(data).Replace("NetworkClient", client.Value.Name).Replace("NetworkServer", server.Value.Name);
-            AddPacketHandler(packet[..^6], packet, result.Contains("Clientbound("), result.Contains("Serverbound("));
-            context.AddSource($"NanoPackets.Packets.{packet}.g.cs", result);
-        }
+        source.AppendLine("    Unknown");
+        source.AppendLine("}");
+        return source.ToString();
     }
 
-    private static bool IsServer(SyntaxNode s) {
-        if(
-            s is ClassDeclarationSyntax _class &&
-            _class.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) &&
-            _class.BaseList is BaseListSyntax baseList &&
-            baseList.Types.Select(x => x.Type).OfType<GenericNameSyntax>().Any(x => serverBases.Contains(x.Identifier.Text))
-        ) {
-            return true;
-        }
+    private static void EmitServerPartials(
+        SourceProductionContext context, NetworkInformation server,
+        List<string> serverHandlers, IEnumerable<string> packetNamespaces) {
 
-        return false;
+        var (usings, classLines) = BuildPartialPreamble(server, packetNamespaces);
+
+        var broadcast = ReadManifestString("NanoPackets.Generator.Templates.Broadcast.cs")
+            .Split(new[] { "/* CLASS_LINE */" }, StringSplitOptions.None);
+        usings += broadcast[0];
+        context.AddSource(
+            $"{(string.IsNullOrWhiteSpace(server.Namespace) ? "" : $"{server.Namespace}.")}{server.ClassIdent}Broadcast.g.cs",
+            usings + classLines + broadcast[1]);
+
+        var handlers = ReadManifestString("NanoPackets.Generator.Templates.ServerHandlers.cs")
+            .Split(new[] { "/* CLASS_LINE */" }, StringSplitOptions.None);
+        usings += handlers[0];
+        var result = usings + classLines + handlers[1]
+            .Replace("NetworkServer", server.ClassIdent)
+            .Replace("/* PACKET_HANDLERS */", string.Join("\n            ", serverHandlers));
+        context.AddSource(
+            $"{(string.IsNullOrWhiteSpace(server.Namespace) ? "" : $"{server.Namespace}.")}{server.ClassIdent}Handlers.g.cs",
+            result);
     }
 
-    private static bool IsClient(SyntaxNode s) {
-        if(
-            s is ClassDeclarationSyntax _class &&
-            _class.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) &&
-            _class.BaseList is BaseListSyntax baseList &&
-            baseList.Types.Select(x => x.Type).OfType<GenericNameSyntax>().Any(x => clientBases.Contains(x.Identifier.Text))
-        ) {
-            return true;
-        }
+    private static void EmitClientPartials(
+        SourceProductionContext context, NetworkInformation client,
+        List<string> clientHandlers, IEnumerable<string> packetNamespaces) {
 
-        return false;
+        var (usings, classLines) = BuildPartialPreamble(client, packetNamespaces);
+
+        var handlers = ReadManifestString("NanoPackets.Generator.Templates.ClientHandlers.cs")
+            .Split(new[] { "/* CLASS_LINE */" }, StringSplitOptions.None);
+        usings += handlers[0];
+        var result = usings + classLines + handlers[1]
+            .Replace("NetworkClient", client.ClassIdent)
+            .Replace("/* PACKET_HANDLERS */", string.Join("\n            ", clientHandlers));
+        context.AddSource(
+            $"{(string.IsNullOrWhiteSpace(client.Namespace) ? "" : $"{client.Namespace}.")}{client.ClassIdent}Handlers.g.cs",
+            result);
     }
 
-    private static NetworkInformation NetworkTransform(GeneratorSyntaxContext ctx) {
-        var _class = (ClassDeclarationSyntax)ctx.Node;
-
-        NetworkInformation result = new() {
-            Location = _class.GetLocation(),
-            ClassIdent = _class.Identifier.Text,
-        };
-
-        result.ClassLine = $"{_class.Modifiers.ToFullString()}" +
-            $"{_class.Keyword.ToFullString()}" +
-            $"{result.ClassIdent}{(_class.TypeParameterList is null ? "" : _class.TypeParameterList.ToString())} " +
-            $"{(_class.BaseList != null ? _class.BaseList.ToFullString() : "")}" +
-            $"{_class.ConstraintClauses.ToFullString()}";
-
-        var parent = _class.Parent;
-        if(parent != null) {
-            while(parent is not BaseNamespaceDeclarationSyntax) {
-                if(parent.Parent == null) {
-                    break;
-                }
-                parent = parent.Parent;
-            }
-
-            if(parent is BaseNamespaceDeclarationSyntax _namespace) {
-                result.Namespace = _namespace.Name.ToString();
-                if(_namespace.Parent != null) {
-                    foreach(var child in _namespace.Parent.ChildNodes()) {
-                        if(child is UsingDirectiveSyntax _using) {
-                            result.Usings += _using.ToString();
-                            result.Usings += '\n';
-                        }
-                    }
-                }
-            } else {
-                foreach(var child in parent.ChildNodes()) {
-                    if(child is UsingDirectiveSyntax _using) {
-                        result.Usings += _using.ToString();
-                        result.Usings += '\n';
-                    }
-                }
-            }
-        }
-
-        return result;
-    }
-
-    private void ProcessServer(SourceProductionContext context, NetworkInformation info) {
-        if(server != null && server.Value.Name != info.ClassIdent) {
-            context.ReportDiagnostic(
-                Diagnostic.Create(new DiagnosticDescriptor(
-                    "NP0001",
-                    "Multiple server definitions",
-                    "Multiple servers can't be defined in the same assembly",
-                    "codegen",
-                    DiagnosticSeverity.Error,
-                    true
-                ), info.Location)
-            );
+    private static (string Usings, string ClassLines) BuildPartialPreamble(
+        NetworkInformation network, IEnumerable<string> packetNamespaces) {
+        var usings = network.Usings;
+        string classLines;
+        if(!string.IsNullOrWhiteSpace(network.Namespace)) {
+            usings += $"using {network.Namespace};\n";
+            classLines = $"\nnamespace {network.Namespace};\n{network.ClassLine}";
         } else {
-            server = new(info.ClassIdent, info.Namespace);
+            classLines = $"\n{network.ClassLine}";
         }
-    }
 
-    private void ProcessClient(SourceProductionContext context, NetworkInformation info) {
-        if(client != null && client.Value.Name != info.ClassIdent) {
-            context.ReportDiagnostic(
-                Diagnostic.Create(new DiagnosticDescriptor(
-                    "NP0002",
-                    "Multiple client definitions",
-                    "Multiple client can't be defined in the same assembly",
-                    "codegen",
-                    DiagnosticSeverity.Error,
-                    true
-                ), info.Location)
-            );
-        } else {
-            client = new(info.ClassIdent, info.Namespace);
-        }
-    }
-
-    private static bool IsPacket(SyntaxNode s)
-        => s is StructDeclarationSyntax _struct && 
-        _struct.Modifiers.Any(x => x.IsKind(SyntaxKind.PartialKeyword)) && // TODO: Report missing partial keyword diagnostics
-        _struct.AttributeLists.Any(x => x.Attributes.Any(x => x.Name.ToString() == "Packet"));
-
-    private static PacketInformation PacketTransform(GeneratorSyntaxContext ctx) {
-        var _struct = (StructDeclarationSyntax)ctx.Node;
-        if(_struct.AttributeLists.Select(x => x.Attributes.First(x => x.Name.ToString() == "Packet")).First() is AttributeSyntax attr) {
-            var methods = _struct.Members.OfType<MethodDeclarationSyntax>();
-            var v = _struct.Members.OfType<FieldDeclarationSyntax>().First().Modifiers;
-            PacketInformation result = new() {
-                Packet = _struct,
-                Fields = _struct.Members.OfType<FieldDeclarationSyntax>()
-                    .Where(x => x.Modifiers.Any(x => x.IsKind(SyntaxKind.PublicKeyword)) && !x.Modifiers.Any(x => x.IsKind(SyntaxKind.ConstKeyword)))
-                    .SelectMany(x => x.Declaration.Variables.Select(t => new FieldInformation(
-                        x.Declaration.Type.ToString(),
-                        t.Identifier.Text,
-                        x.AttributeLists.Any(x => x.Attributes.Any(x => x.Name.ToString() == "TransferExplicit"))
-                    ))),
-                StructIdent = _struct.Identifier.Text,
-                // TODO: Check for interface and report diagnostics; there's more room for improvement afterwards
-                Clientbound = methods.FirstOrDefault(x => x.Identifier.Text == "Clientbound")?.ParameterList.Parameters.First().Type!.ToString(),
-                Serverbound = methods.FirstOrDefault(x => x.Identifier.Text == "Serverbound")?.ParameterList.Parameters.First().Type!.ToString(),
-            };
-            if(attr.ArgumentList is AttributeArgumentListSyntax list) {
-                result.Ordered = list.Arguments[0].ToString() == "true";
-                result.Reliable = list.Arguments[1].ToString() == "true";
+        foreach(var ns in packetNamespaces) {
+            if(!usings.Contains(ns)) {
+                usings += $"using {ns};\n";
             }
-            result.StructLine = $"{_struct.Modifiers.ToFullString()}" +
-                $"{_struct.Keyword.ToFullString()}" +
-                $"{result.StructIdent}{(_struct.TypeParameterList is null ? "" : _struct.TypeParameterList.ToString())} " +
-                $"{(_struct.BaseList != null ? _struct.BaseList.ToFullString() : "")}" +
-                $"{_struct.ConstraintClauses.ToFullString()}";
-
-            var parent = _struct.Parent;
-            if(parent != null) {
-                while(parent is not BaseNamespaceDeclarationSyntax) {
-                    if(parent.Parent == null) {
-                        break;
-                    }
-                    parent = parent.Parent;
-                }
-
-                if(parent is BaseNamespaceDeclarationSyntax _namespace) {
-                    result.Namespace = _namespace.Name.ToString();
-                    if(_namespace.Parent != null) {
-                        foreach(var child in _namespace.Parent.ChildNodes()) {
-                            if(child is UsingDirectiveSyntax _using) {
-                                result.Usings += _using.ToString();
-                                result.Usings += '\n';
-                            }
-                        }
-                    }
-                } else {
-                    foreach(var child in parent.ChildNodes()) {
-                        if(child is UsingDirectiveSyntax _using) {
-                            result.Usings += _using.ToString();
-                            result.Usings += '\n';
-                        }
-                    }
-                }
-            }
-
-
-            return result;
-        } else {
-            throw new Exception("IsSyntaxTargetForGeneration output is incorrect");
         }
+
+        return (usings, classLines);
     }
 
-    private void ProcessPacket(SourceProductionContext context, PacketInformation info) {
-        if(!info.Fields.Any()) {
-            return;
-        }
+    private static string BuildPacketSource(PacketInformation info, ExtensionInformation extensions) {
         var source = new StringBuilder();
         var hasNamespace = !string.IsNullOrWhiteSpace(info.Namespace);
 
         source.AppendLine("using Riptide;");
-        source.AppendLine(extensions[..^1]);
+        if(!string.IsNullOrEmpty(extensions.Usings)) {
+            source.AppendLine(extensions.Usings.TrimEnd('\n'));
+        }
         source.AppendLine("using System.Runtime.InteropServices;");
         source.AppendLine("using System.Runtime.CompilerServices;");
         source.AppendLine(info.Usings);
@@ -444,96 +456,101 @@ public class MainGenerator : IIncrementalGenerator {
             source.AppendLine($"namespace {info.Namespace};");
             source.AppendLine();
         }
-        source.AppendLine($"[StructLayout(LayoutKind.Auto)]");
+        source.AppendLine("[StructLayout(LayoutKind.Auto)]");
         source.AppendLine($"{info.StructLine}{{");
 
         var dynamicSendMode = info.Ordered == null;
         if(dynamicSendMode) {
-            source.AppendLine($"    readonly bool ordered;");
-            source.AppendLine($"    readonly bool reliable;");
+            source.AppendLine("    readonly bool ordered;");
+            source.AppendLine("    readonly bool reliable;");
         }
 
         var parameters = string.Join(", ", info.Fields.Select(x => $"{x.Type} {x.Name.ToCamelCase()}"));
         source.AppendLine($"    public {info.StructIdent}({(dynamicSendMode ? "bool ordered, bool reliable, " : "")}{parameters}) {{");
         if(dynamicSendMode) {
-            source.AppendLine($"        this.ordered = ordered;");
-            source.AppendLine($"        this.reliable = reliable;");
+            source.AppendLine("        this.ordered = ordered;");
+            source.AppendLine("        this.reliable = reliable;");
         }
         foreach(var field in info.Fields) {
             source.AppendLine($"        this.{field.Name} = {field.Name.ToCamelCase()};");
         }
-        source.AppendLine($"    }}");
+        source.AppendLine("    }");
         if(dynamicSendMode) {
             source.AppendLine();
             source.AppendLine($"    {info.StructIdent}({parameters}) {{");
             foreach(var field in info.Fields) {
                 source.AppendLine($"        this.{field.Name} = {field.Name.ToCamelCase()};");
             }
-            source.AppendLine($"    }}");
+            source.AppendLine("    }");
         }
         source.AppendLine();
 
         var sendMode = dynamicSendMode
-            ? "sendMode" :
-            (info.Ordered == true ? "MessageSendMode.Notify" : (info.Reliable == true ? "MessageSendMode.Reliable" : "MessageSendMode.Unreliable"));
-        source.AppendLine($"    public Message Write() {{");
+            ? "sendMode"
+            : (info.Ordered == true ? "MessageSendMode.Notify" : (info.Reliable == true ? "MessageSendMode.Reliable" : "MessageSendMode.Unreliable"));
+        source.AppendLine("    public Message Write() {");
         if(dynamicSendMode) {
-            source.AppendLine($"        MessageSendMode sendMode;");
-            source.AppendLine($"        if(ordered) {{");
-            source.AppendLine($"            sendMode = MessageSendMode.Notify;");
-            source.AppendLine($"        }} else if(reliable) {{");
-            source.AppendLine($"            sendMode = MessageSendMode.Reliable;");
-            source.AppendLine($"        }} else {{");
-            source.AppendLine($"            sendMode = MessageSendMode.Unreliable;");
-            source.AppendLine($"        }}");
+            source.AppendLine("        MessageSendMode sendMode;");
+            source.AppendLine("        if(ordered) {");
+            source.AppendLine("            sendMode = MessageSendMode.Notify;");
+            source.AppendLine("        } else if(reliable) {");
+            source.AppendLine("            sendMode = MessageSendMode.Reliable;");
+            source.AppendLine("        } else {");
+            source.AppendLine("            sendMode = MessageSendMode.Unreliable;");
+            source.AppendLine("        }");
             source.AppendLine();
         }
         source.AppendLine($"        var msg = Message.Create({sendMode}, PacketId.Batch);");
         if(dynamicSendMode) {
-            source.AppendLine($"        if(ordered) {{");
-            source.AppendLine($"            msg.AddBool(reliable);");
-            source.AppendLine($"        }}");
+            source.AppendLine("        if(ordered) {");
+            source.AppendLine("            msg.AddBool(reliable);");
+            source.AppendLine("        }");
         }
         source.AppendLine();
         foreach(var field in info.Fields) {
-            source.AppendLine($"        msg.Add{IntoTypeName(field.Type, field.IsExplicit)}({field.Name});");
+            source.AppendLine($"        msg.Add{IntoTypeName(field.Type, field.IsExplicit, extensions.TypeNameExtensions)}({field.Name});");
         }
         source.AppendLine();
-        source.AppendLine($"        return msg;");
-        source.AppendLine($"    }}");
+        source.AppendLine("        return msg;");
+        source.AppendLine("    }");
         source.AppendLine();
-        source.AppendLine($"    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+        source.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
         source.AppendLine($"    public static {info.StructIdent} Read(Message _msg) {{");
         if(dynamicSendMode) {
-            source.AppendLine($"        if(_msg.SendMode == MessageSendMode.Notify) {{");
-            source.AppendLine($"            _msg.GetBool();");
-            source.AppendLine($"        }}");
+            source.AppendLine("        if(_msg.SendMode == MessageSendMode.Notify) {");
+            source.AppendLine("            _msg.GetBool();");
+            source.AppendLine("        }");
             source.AppendLine();
         }
         foreach(var field in info.Fields) {
-            source.AppendLine($"        {field.Type} {field.Name.ToCamelCase()} = _msg.Get{IntoTypeName(field.Type, field.IsExplicit)}();");
+            source.AppendLine($"        {field.Type} {field.Name.ToCamelCase()} = _msg.Get{IntoTypeName(field.Type, field.IsExplicit, extensions.TypeNameExtensions)}();");
         }
         source.AppendLine();
         source.AppendLine($"        return new {info.StructIdent}({string.Join(", ", info.Fields.Select(x => x.Name.ToCamelCase()))});");
-        source.AppendLine($"    }}");
+        source.AppendLine("    }");
 
         if(info.Clientbound is string client) {
             source.AppendLine($"    public static void Read(Message _msg, {client} _network, int _player) => Read(_msg).Clientbound(_network, _player);");
         }
-
         if(info.Serverbound is string server) {
             source.AppendLine($"    public static void Read(Message _msg, {server} _network, ushort _player) => Read(_msg).Serverbound(_network, _player);");
         }
 
-        source.AppendLine($"}}");
-
-        context.AddSource($"{(string.IsNullOrWhiteSpace(info.Namespace) ? "" : $"{info.Namespace}.")}{info.StructIdent}.g.cs", source.ToString());
+        source.AppendLine("}");
+        return source.ToString();
     }
 
-    static bool Recursive<T>(T symbol, Func<T, bool> check, Func<T, T?> next)
-        => (check.Invoke(symbol) || (next.Invoke(symbol) is T result && Recursive(result, check, next)));
+    // ---- Resources & type mapping -----------------------------------------------------------
 
-    public string IntoTypeName(string type, bool isExplicit) {
+    private static string ReadManifestString(string name) {
+        var assembly = typeof(MainGenerator).Assembly;
+        using var stream = assembly.GetManifestResourceStream(name)
+            ?? throw new InvalidOperationException($"Embedded resource '{name}' was not found in the generator assembly.");
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
+    }
+
+    private static string IntoTypeName(string type, bool isExplicit, Dictionary<string, string> typeNameExtensions) {
         var isArray = false;
         if(type.EndsWith("[]")) {
             type = type[..^2];
@@ -550,7 +567,7 @@ public class MainGenerator : IIncrementalGenerator {
                 "uint" => "UInt",
                 "long" => "Long",
                 "ulong" => "ULong",
-                _ => IntoGetBase(type, ref isArray)
+                _ => IntoGetBase(type, ref isArray, typeNameExtensions)
             };
         } else {
             switch(type) {
@@ -571,7 +588,7 @@ public class MainGenerator : IIncrementalGenerator {
                     }
                     break;
                 default:
-                    result = IntoGetBase(type, ref isArray);
+                    result = IntoGetBase(type, ref isArray, typeNameExtensions);
                     break;
             }
         }
@@ -581,13 +598,13 @@ public class MainGenerator : IIncrementalGenerator {
         return result;
     }
 
-    public string IntoGetBase(string type, ref bool isArray) {
+    private static string IntoGetBase(string type, ref bool isArray, Dictionary<string, string> typeNameExtensions) {
         var result = type switch {
             "bool" => "Bool",
             "string" => "String",
             _ => null
         };
-        if(result == null && !typeNameExtensions.TryGetValue(type, out result)) { 
+        if(result == null && !typeNameExtensions.TryGetValue(type, out result)) {
             if(isArray) {
                 result = $"Serializables<{type}>";
                 isArray = false;
@@ -595,6 +612,6 @@ public class MainGenerator : IIncrementalGenerator {
                 result = $"Serializable<{type}>";
             }
         }
-        return result;
+        return result!;
     }
 }
