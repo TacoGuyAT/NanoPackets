@@ -1,4 +1,5 @@
 ﻿using Riptide;
+using NanoPackets.Utils;
 
 namespace NanoPackets;
 public partial interface INetObject {
@@ -10,7 +11,7 @@ public partial interface INetObject {
 
     public void Serialize(Message msg, bool prefab = false) {
         msg.AddVarULong(Id);
-        msg.Add(prefab ? GetType().Name : null);
+        msg.AddOptionalString(prefab ? GetType().Name : null);
         Serialize(msg);
     }
 
