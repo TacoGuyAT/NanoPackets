@@ -10,10 +10,21 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
 {
     public Client Client => (Client)Peer;
     protected Dictionary<ushort, Message> reliableMessages = [];
+
+    /// <summary>Ensures <see cref="OnDisconnect"/> is raised exactly once, whether the disconnect
+    /// originates from us calling <see cref="Disconnect"/> or from the transport.</summary>
+    private bool disconnectNotified;
+
     public NetworkClientBase(TWorld world, IClient transport, string addr) : base(world, new Client(transport)) {
         Client.ClientDisconnected += (s, e) => {
             Players.Remove(e.Id, out var p);
             ((TNetPlayer)p!)!.NetHandleDisconnect(); // TODO: handle null and cast? should be impossible to hit
+        };
+        Client.Disconnected += (s, e) => {
+            // Transport-initiated disconnect (timed out, kicked, server stopped, ...). Protocol-level
+            // disconnects that carry a DisconnectCode/reason are surfaced via Disconnect() instead;
+            // the guard in NotifyDisconnect keeps this from firing OnDisconnect a second time.
+            NotifyDisconnect(MapDisconnectReason(e.Reason), e.Reason.ToString());
         };
         Client.MessageReceived += (s, e) => {
             HandlePacket(e.MessageId, e.Message, -1);
@@ -56,8 +67,24 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
 
     public void Disconnect(DisconnectCode code, string reason) {
         RiptideLogger.Log(LogType.Error, $"Client: {code} - {reason}");
+        NotifyDisconnect(code, reason);
         Client.Disconnect();
     }
+
+    /// <summary>Raises <see cref="OnDisconnect"/> at most once for this client.</summary>
+    private void NotifyDisconnect(DisconnectCode code, string reason) {
+        if(disconnectNotified) {
+            return;
+        }
+        disconnectNotified = true;
+        OnDisconnect(code, reason);
+    }
+
+    private static DisconnectCode MapDisconnectReason(DisconnectReason reason) => reason switch {
+        // The NanoPackets codes describe protocol-level failures; transport reasons don't map onto
+        // them, so they surface as Generic with the Riptide reason carried in the reason string.
+        _ => DisconnectCode.Generic,
+    };
 
     protected abstract void OnDisconnect(DisconnectCode code, string reason);
 }
