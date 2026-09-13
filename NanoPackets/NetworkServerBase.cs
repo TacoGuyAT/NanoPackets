@@ -20,33 +20,32 @@ public abstract class NetworkServerBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
             var newPlayer = NewPlayer(e.Client.Id);
             newPlayer.NetHandleConnect(e.Client.Id);
             e.Client.NotifyDelivered += (id) => {
-                var senderId = e.Client.Id;
-                if(!reliableMessages.ContainsKey(senderId)) {
-                    reliableMessages.Add(senderId, []);
-                } else if(reliableMessages[senderId].TryGetValue(id, out var msg)) {
-                    messagesReferenceCount[msg] -= 1;
-                    if(messagesReferenceCount[msg] == 0) {
-                        messagesReferenceCount.Remove(msg);
-                        msg.Release();
-                    }
+                // Drop the per-client entry for the acked sequence id (it was never removed before,
+                // so these maps grew without bound) and release the shared message once every
+                // recipient has acked or given up. Never throw from a transport callback.
+                if(reliableMessages.TryGetValue(e.Client.Id, out var msgs) && msgs.Remove(id, out var msg)) {
+                    ReleaseReference(msg);
                 } else {
-                    throw new Exception("NotifyDelivered event was received for an unregistered message");
+                    RiptideLogger.Log(LogType.Warning, $"Server: NotifyDelivered for an untracked message (client {e.Client.Id}, id {id})");
                 }
             };
             e.Client.NotifyLost += (id) => {
-                if(reliableMessages.TryGetValue(e.Client.Id, out var msgs)) {
-                    if(msgs.Remove(id, out var msg)) {
-                        msg.GetVarULong();
-                        if(msg.GetBool()) {
-                            msgs.Add(e.Client.Send(msg, false), msg);
-                        } else {
-                            messagesReferenceCount.Remove(msg);
-                            msg.Release();
-                        }
+                if(reliableMessages.TryGetValue(e.Client.Id, out var msgs) && msgs.Remove(id, out var msg)) {
+                    msg.GetVarULong();
+                    if(msg.GetBool()) {
+                        // Reliable: retransmit to this client. The message stays outstanding, so its
+                        // reference count is unchanged (this pending entry is replaced by the new one).
+                        msgs.Add(e.Client.Send(msg, false), msg);
+                    } else {
+                        // Unreliable: give up for this client. The same Message instance is shared
+                        // across all recipients, so only release it once none still has it in flight
+                        // (previously it was released here unconditionally, freeing it while other
+                        // clients still referenced it).
+                        ReleaseReference(msg);
                     }
                 } else {
                     // TODO: shutdown server
-                    if(Players.TryGetValue(e.Client.Id, out var player)) { 
+                    if(Players.TryGetValue(e.Client.Id, out var player)) {
                         RiptideLogger.Log(LogType.Error, $"Server: Notify message lost for {player}. Desync?");
                     } else {
                         RiptideLogger.Log(LogType.Error, $"Server: Notify message lost for an unknown player (ID #{e.Client.Id}). Desync?");
@@ -86,6 +85,22 @@ public abstract class NetworkServerBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
             }
         } else {
             Server.SendToAll(msg);
+        }
+    }
+
+    /// <summary>
+    /// Decrements the outstanding-recipient count for a notify message and releases it back to the
+    /// pool once no recipient still has it in flight.
+    /// </summary>
+    private void ReleaseReference(Message msg) {
+        if(!messagesReferenceCount.TryGetValue(msg, out var count)) {
+            return;
+        }
+        if(count <= 1) {
+            messagesReferenceCount.Remove(msg);
+            msg.Release();
+        } else {
+            messagesReferenceCount[msg] = count - 1;
         }
     }
 
