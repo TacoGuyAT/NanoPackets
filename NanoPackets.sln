@@ -13,6 +13,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.Common", "NanoP
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.Example", "NanoPackets.Example\NanoPackets.Example.csproj", "{274A3C19-0E02-4156-A437-7A20E4BA2566}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.LoopTransport", "NanoPackets.LoopTransport\NanoPackets.LoopTransport.csproj", "{A5AA7E66-B720-4F7D-942C-F9C09EF07F38}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.SteamTransport", "NanoPackets.SteamTransport\NanoPackets.SteamTransport.csproj", "{D22A166E-02B6-4156-9FFB-28397A0212BC}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -39,6 +43,14 @@ Global
 		{274A3C19-0E02-4156-A437-7A20E4BA2566}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{274A3C19-0E02-4156-A437-7A20E4BA2566}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{274A3C19-0E02-4156-A437-7A20E4BA2566}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A5AA7E66-B720-4F7D-942C-F9C09EF07F38}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A5AA7E66-B720-4F7D-942C-F9C09EF07F38}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A5AA7E66-B720-4F7D-942C-F9C09EF07F38}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A5AA7E66-B720-4F7D-942C-F9C09EF07F38}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
