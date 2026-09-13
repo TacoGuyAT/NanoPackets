@@ -19,16 +19,18 @@ public class LoopbackServer : LoopbackPeer, IServer {
         registry[port] = this;
     }
 
+    /// <summary>
+    /// Tears down this side of the connection. Purely local: Riptide's own Server.DisconnectClient()/
+    /// Stop() already send a MessageHeader.Disconnect message down the normal data channel before
+    /// calling this, and that is what informs the client (see the remarks on <see cref="LoopbackPeer"/>).
+    /// </summary>
     public void Close(Connection connection) {
-        if(connection is LoopbackConnection loopbackConnection && connections.Remove(loopbackConnection)) {
-            loopbackConnection.RequestDisconnect(DisconnectReason.Disconnected);
+        if(connection is LoopbackConnection loopbackConnection) {
+            connections.Remove(loopbackConnection);
         }
     }
 
     public void Shutdown() {
-        foreach(var connection in connections) {
-            connection.RequestDisconnect(DisconnectReason.ServerStopped);
-        }
         connections.Clear();
 
         if(registry.TryGetValue(Port, out var self) && self == this) {

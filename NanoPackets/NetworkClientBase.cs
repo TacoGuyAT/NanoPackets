@@ -24,10 +24,20 @@ public abstract class NetworkClientBase<TWorld, TPlayerBase, TPlayer, TNetPlayer
             }
         };
         Client.Disconnected += (s, e) => {
-            // Transport-initiated disconnect (timed out, kicked, server stopped, ...). Protocol-level
-            // disconnects that carry a DisconnectCode/reason are surfaced via Disconnect() instead;
-            // the guard in NotifyDisconnect keeps this from firing OnDisconnect a second time.
-            NotifyDisconnect(MapDisconnectReason(e.Reason), e.Reason.ToString());
+            // Server.DisconnectClient(id, message) never reaches HandlePacket/MessageReceived - Riptide
+            // hands that message back here instead, as e.Message, positioned exactly like the raw
+            // messages passed to HandlePacket elsewhere in this class (our own PacketId varulong still
+            // at the front). Decode it using the same wire format DisconnectPacket.Write()/Read() use,
+            // so a server-supplied DisconnectCode/reason actually reaches OnDisconnect instead of
+            // always reporting the generic transport-level reason.
+            if(e.Message is Message msg) {
+                msg.GetVarULong();
+                var code = (DisconnectCode)msg.GetVarULong();
+                var reason = msg.GetString();
+                NotifyDisconnect(code, reason);
+            } else {
+                NotifyDisconnect(MapDisconnectReason(e.Reason), e.Reason.ToString());
+            }
         };
         Client.MessageReceived += (s, e) => {
             HandlePacket(e.MessageId, e.Message, -1);

@@ -6,7 +6,9 @@ namespace NanoPackets.LoopTransport;
 /// <summary>An in-process client that connects to a <see cref="LoopbackServer"/> listening in the same process.</summary>
 public class LoopbackClient : LoopbackPeer, IClient {
     public event EventHandler? Connected;
+#pragma warning disable CS0067 // Connect() below never fails - there's no real handshake to reject
     public event EventHandler? ConnectionFailed;
+#pragma warning restore CS0067
 
     private LoopbackConnection? connection;
 
@@ -27,8 +29,12 @@ public class LoopbackClient : LoopbackPeer, IClient {
         return true;
     }
 
+    /// <summary>
+    /// Tears down this side of the connection. Purely local: Riptide's own Client.Disconnect() already
+    /// sends a MessageHeader.Disconnect message down the normal data channel before calling this, and
+    /// that is what informs the server (see the remarks on <see cref="LoopbackPeer"/>).
+    /// </summary>
     public void Disconnect() {
-        connection?.RequestDisconnect(DisconnectReason.Disconnected);
         connection = null;
     }
 }
