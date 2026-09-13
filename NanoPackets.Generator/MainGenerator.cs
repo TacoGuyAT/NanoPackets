@@ -371,13 +371,36 @@ public class MainGenerator : IIncrementalGenerator {
     private static string BuildEnum(IEnumerable<string> entries) {
         var source = new StringBuilder();
         source.AppendLine("namespace NanoPackets;");
-        source.AppendLine("public enum PacketId {");
+        // Message.Create(MessageSendMode, Enum) unboxes the id straight to ushort, which throws
+        // for an int-backed enum (the default); the underlying type must match exactly.
+        source.AppendLine("public enum PacketId : ushort {");
         foreach(var entry in entries) {
             source.AppendLine($"    {entry},");
         }
         source.AppendLine("    Unknown");
         source.AppendLine("}");
         return source.ToString();
+    }
+
+    /// <summary>
+    /// Drops duplicate <c>using</c> lines while preserving order. The preamble is assembled from
+    /// several sources (the packet-declaring file's own usings, packet namespaces, hardcoded
+    /// template usings) that can legitimately overlap, which otherwise surfaces as CS0105 in every
+    /// consuming project.
+    /// </summary>
+    private static string DeduplicateUsings(string usings) {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new StringBuilder();
+        foreach(var line in usings.Split('\n')) {
+            var trimmed = line.Trim();
+            if(trimmed.Length == 0) {
+                continue;
+            }
+            if(seen.Add(trimmed)) {
+                result.Append(trimmed).Append('\n');
+            }
+        }
+        return result.ToString();
     }
 
     private static void EmitServerPartials(
@@ -391,12 +414,12 @@ public class MainGenerator : IIncrementalGenerator {
         usings += broadcast[0];
         context.AddSource(
             $"{(string.IsNullOrWhiteSpace(server.Namespace) ? "" : $"{server.Namespace}.")}{server.ClassIdent}Broadcast.g.cs",
-            usings + classLines + broadcast[1]);
+            DeduplicateUsings(usings) + classLines + broadcast[1]);
 
         var handlers = ReadManifestString("NanoPackets.Generator.Templates.ServerHandlers.cs")
             .Split(new[] { "/* CLASS_LINE */" }, StringSplitOptions.None);
         usings += handlers[0];
-        var result = usings + classLines + handlers[1]
+        var result = DeduplicateUsings(usings) + classLines + handlers[1]
             .Replace("NetworkServer", server.ClassIdent)
             .Replace("/* PACKET_HANDLERS */", string.Join("\n            ", serverHandlers));
         context.AddSource(
@@ -413,7 +436,7 @@ public class MainGenerator : IIncrementalGenerator {
         var handlers = ReadManifestString("NanoPackets.Generator.Templates.ClientHandlers.cs")
             .Split(new[] { "/* CLASS_LINE */" }, StringSplitOptions.None);
         usings += handlers[0];
-        var result = usings + classLines + handlers[1]
+        var result = DeduplicateUsings(usings) + classLines + handlers[1]
             .Replace("NetworkClient", client.ClassIdent)
             .Replace("/* PACKET_HANDLERS */", string.Join("\n            ", clientHandlers));
         context.AddSource(
@@ -444,6 +467,7 @@ public class MainGenerator : IIncrementalGenerator {
     private static string BuildPacketSource(PacketInformation info, ExtensionInformation extensions) {
         var source = new StringBuilder();
         var hasNamespace = !string.IsNullOrWhiteSpace(info.Namespace);
+        var packetId = info.StructIdent.EndsWith("Packet") ? info.StructIdent[..^6] : info.StructIdent;
 
         source.AppendLine("using Riptide;");
         if(!string.IsNullOrEmpty(extensions.Usings)) {
@@ -500,7 +524,7 @@ public class MainGenerator : IIncrementalGenerator {
             source.AppendLine("        }");
             source.AppendLine();
         }
-        source.AppendLine($"        var msg = Message.Create({sendMode}, PacketId.Batch);");
+        source.AppendLine($"        var msg = Message.Create({sendMode}, PacketId.{packetId});");
         if(dynamicSendMode) {
             source.AppendLine("        if(ordered) {");
             source.AppendLine("            msg.AddBool(reliable);");
@@ -572,12 +596,20 @@ public class MainGenerator : IIncrementalGenerator {
         } else {
             switch(type) {
                 case "sbyte":
-                case "byte":
                 case "short":
-                case "ushort":
                 case "int":
-                case "uint":
                 case "long":
+                    result = "VarLong";
+                    if(isArray) {
+                        result += $"s<{type}>";
+                        isArray = false;
+                    } else {
+                        result += $"<{type}>";
+                    }
+                    break;
+                case "byte":
+                case "ushort":
+                case "uint":
                 case "ulong":
                     result = "VarULong";
                     if(isArray) {

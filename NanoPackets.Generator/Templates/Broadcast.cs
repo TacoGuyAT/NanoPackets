@@ -1,4 +1,5 @@
-﻿using System.Runtime.CompilerServices;
+﻿using Riptide;
+using System.Runtime.CompilerServices;
 /* CLASS_LINE */{
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Message AsClient(Message msg, ushort playerId) {
