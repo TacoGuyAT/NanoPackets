@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.LoopTransport",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.SteamTransport", "NanoPackets.SteamTransport\NanoPackets.SteamTransport.csproj", "{D22A166E-02B6-4156-9FFB-28397A0212BC}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoPackets.Tests", "NanoPackets.Tests\NanoPackets.Tests.csproj", "{CB451465-AC40-4965-BBFC-18A799C6076A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -51,6 +53,10 @@ Global
 		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D22A166E-02B6-4156-9FFB-28397A0212BC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CB451465-AC40-4965-BBFC-18A799C6076A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CB451465-AC40-4965-BBFC-18A799C6076A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CB451465-AC40-4965-BBFC-18A799C6076A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CB451465-AC40-4965-BBFC-18A799C6076A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
