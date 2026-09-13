@@ -1,4 +1,5 @@
 using Riptide;
+using System;
 using System.Numerics;
 
 namespace NanoPackets.Utils;
@@ -8,7 +9,7 @@ public static class Extensions {
     /// <param name="value">The <see cref="float"/> to add.</param>
     /// <returns>The message that the <see cref="float"/> was added to.</returns>
     public static Message AddHalf(this Message message, float value) {
-        return message.AddUShort((ushort)(value * ushort.MaxValue));
+        return message.AddUShort((ushort)(Math.Clamp(value, 0f, 1f) * ushort.MaxValue));
     }
 
     /// <summary>Retrieves a <see cref="float"/> in range of 0..=1 from the message in <see cref="ushort"/> precision.</summary>
@@ -23,7 +24,7 @@ public static class Extensions {
     /// <param name="value">The <see cref="float"/> to add.</param>
     /// <returns>The message that the <see cref="float"/> was added to.</returns>
     public static Message AddSHalf(this Message message, float value) {
-        return message.AddShort((short)(value * short.MaxValue));
+        return message.AddShort((short)(Math.Clamp(value, -1f, 1f) * short.MaxValue));
     }
 
     /// <summary>Retrieves a <see cref="float"/> in range of -1..=1 from the message in <see cref="short"/> precision.</summary>
