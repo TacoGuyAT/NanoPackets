@@ -469,13 +469,16 @@ public class MainGenerator : IIncrementalGenerator {
         var hasNamespace = !string.IsNullOrWhiteSpace(info.Namespace);
         var packetId = info.StructIdent.EndsWith("Packet") ? info.StructIdent[..^6] : info.StructIdent;
 
-        source.AppendLine("using Riptide;");
+        var usings = new StringBuilder();
+        usings.AppendLine("#nullable enable");
+        usings.AppendLine("using Riptide;");
         if(!string.IsNullOrEmpty(extensions.Usings)) {
-            source.AppendLine(extensions.Usings.TrimEnd('\n'));
+            usings.AppendLine(extensions.Usings.TrimEnd('\n'));
         }
-        source.AppendLine("using System.Runtime.InteropServices;");
-        source.AppendLine("using System.Runtime.CompilerServices;");
-        source.AppendLine(info.Usings);
+        usings.AppendLine("using System.Runtime.InteropServices;");
+        usings.AppendLine("using System.Runtime.CompilerServices;");
+        usings.AppendLine(info.Usings);
+        source.Append(DeduplicateUsings(usings.ToString()));
         if(hasNamespace) {
             source.AppendLine($"namespace {info.Namespace};");
             source.AppendLine();
@@ -634,6 +637,9 @@ public class MainGenerator : IIncrementalGenerator {
         var result = type switch {
             "bool" => "Bool",
             "string" => "String",
+            "string?" => "OptionalString",
+            "float" => "Float",
+            "double" => "Double",
             _ => null
         };
         if(result == null && !typeNameExtensions.TryGetValue(type, out result)) {

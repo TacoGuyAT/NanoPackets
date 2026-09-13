@@ -17,7 +17,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\NanoPackets.Generator\NanoPackets.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <!-- ReferenceOutputAssembly left at its default (true) in addition to OutputItemType=Analyzer, so
+         GeneratorDiagnosticsTests can drive MainGenerator directly through the Roslyn APIs, not just
+         have it run implicitly as an analyzer over this project's own packet/network declarations. -->
+    <ProjectReference Include="..\NanoPackets.Generator\NanoPackets.Generator.csproj" OutputItemType="Analyzer" />
     <ProjectReference Include="..\NanoPackets\NanoPackets.csproj" />
     <ProjectReference Include="..\NanoPackets.LoopTransport\NanoPackets.LoopTransport.csproj" />
   </ItemGroup>

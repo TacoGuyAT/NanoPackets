@@ -43,14 +43,8 @@ public static class Extensions {
         }
     }
 
-    public static bool GetOptionalString(this Message msg, out string? text) {
-        if(msg.GetBool()) {
-            text = msg.GetString();
-            return true;
-        } else {
-            text = null;
-            return false;
-        }
+    public static string? GetOptionalString(this Message msg) {
+        return msg.GetBool() ? msg.GetString() : null;
     }
 
     public static void AddVarULong<T>(this Message msg, T value) where T : IBinaryInteger<T> {
@@ -61,12 +55,22 @@ public static class Extensions {
         return T.CreateChecked(msg.GetVarULong());
     }
 
+    /// <remarks>
+    /// Zigzag-encodes onto <see cref="AddVarULong(Message, ulong)"/> rather than using Riptide's own
+    /// <c>Message.AddVarLong(long)</c>: that method corrupts any value whose zigzag encoding needs the
+    /// 64th bit (confirmed in isolation, with no NanoPackets code involved - e.g. long.MinValue round
+    /// trips as 0, long.MaxValue as -1), while the unsigned varint writer it and this both sit on top
+    /// of is correct across its full range.
+    /// </remarks>
     public static void AddVarLong<T>(this Message msg, T value) where T : IBinaryInteger<T> {
-        msg.AddVarLong(long.CreateChecked(value));
+        var signed = long.CreateChecked(value);
+        msg.AddVarULong((ulong)((signed << 1) ^ (signed >> 63)));
     }
 
     public static T GetVarLong<T>(this Message msg) where T : IBinaryInteger<T> {
-        return T.CreateChecked(msg.GetVarLong());
+        var zigzagged = msg.GetVarULong();
+        var signed = (long)(zigzagged >> 1) ^ -(long)(zigzagged & 1);
+        return T.CreateChecked(signed);
     }
 
     public static void AddVarULongs<T>(this Message msg, T[] values) where T : IBinaryInteger<T> {
@@ -88,7 +92,7 @@ public static class Extensions {
     public static void AddVarLongs<T>(this Message msg, T[] values) where T : IBinaryInteger<T> {
         msg.AddVarULong((ulong)values.Length);
         foreach(var value in values) {
-            msg.AddVarLong(long.CreateChecked(value));
+            msg.AddVarLong(value);
         }
     }
 
@@ -96,7 +100,7 @@ public static class Extensions {
         var len = (int)msg.GetVarULong();
         var array = new T[len];
         for(var i = 0; i < len; i++) {
-            array[i] = T.CreateChecked(msg.GetVarLong());
+            array[i] = msg.GetVarLong<T>();
         }
         return array;
     }

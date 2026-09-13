@@ -13,7 +13,7 @@ public class RoundTripTests {
         fixture.Client.Send(new IntPacket(42).Write());
         fixture.Pump();
 
-        Assert.Equal(42, fixture.Server.LastIntValue);
+        Assert.Equal(42, fixture.Server.Received.IntValue);
     }
 
     [Theory]
@@ -29,7 +29,7 @@ public class RoundTripTests {
         fixture.Client.Send(new IntPacket(value).Write());
         fixture.Pump();
 
-        Assert.Equal(value, fixture.Server.LastIntValue);
+        Assert.Equal(value, fixture.Server.Received.IntValue);
     }
 
     [Fact]
@@ -41,6 +41,6 @@ public class RoundTripTests {
         fixture.Client.Send(new IntArrayPacket(values).Write());
         fixture.Pump();
 
-        Assert.Equal(values, fixture.Server.LastIntArray);
+        Assert.Equal(values, fixture.Server.Received.IntArray);
     }
 }
