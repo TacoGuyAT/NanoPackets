@@ -1,7 +1,15 @@
 ﻿using Riptide;
 
 namespace NanoPackets;
-public abstract class NetworkBase<TWorld, TPlayerBase, TPlayer> 
+
+/// <remarks>
+/// Not thread-safe. Riptide raises its connection/message events on whichever thread pumps the
+/// underlying peer (i.e. the thread that calls <c>Server.Update()</c>/<c>Client.Update()</c>), and
+/// the internal collections here (<see cref="Players"/>, the reliable-message maps in the derived
+/// server/client) assume that all such callbacks plus your own <c>Send</c>/<c>QueueToFrame</c> calls
+/// happen on a single thread. Pump and use a given instance from one thread only.
+/// </remarks>
+public abstract class NetworkBase<TWorld, TPlayerBase, TPlayer>
     where TWorld : IWorld<TPlayer>
     where TPlayer : TPlayerBase
 {
