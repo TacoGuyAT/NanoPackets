@@ -37,4 +37,6 @@ public class ReceivedValues {
 
     public bool OptionalStringHandlerRan;
     public string? OptionalString;
+
+    public int? PingPongValue;
 }

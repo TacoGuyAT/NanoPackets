@@ -29,7 +29,7 @@ using System.Runtime.CompilerServices;
                 reliableMessages[client.Id].Add(client.Send(msg, false), msg);
             }
         } else {
-            Server.SendToAll(msg);
+            Server.SendToAll(msg, senderId);
         }
     }
 }

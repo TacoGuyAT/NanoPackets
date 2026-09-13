@@ -9,6 +9,8 @@ namespace NanoPackets.Tests.Fixtures;
 /// </summary>
 public sealed class NetworkFixture : IDisposable {
     private static int portCounter = 40000;
+    private readonly ushort port;
+    private readonly List<TestClient> extraClients = new();
 
     public TestWorld ServerWorld { get; } = new();
     public TestWorld ClientWorld { get; } = new();
@@ -16,23 +18,36 @@ public sealed class NetworkFixture : IDisposable {
     public TestClient Client { get; }
 
     public NetworkFixture(ushort maxClientCount = 10) {
-        var port = NextPort();
+        port = NextPort();
         Server = new TestServer(ServerWorld, new LoopbackServer(), port, maxClientCount);
         Client = new TestClient(ClientWorld, new LoopbackClient(), port.ToString());
     }
 
     private static ushort NextPort() => (ushort)Interlocked.Increment(ref portCounter);
 
-    /// <summary>Advances both peers' Riptide pumps (which polls the transport in turn) several times over.</summary>
+    /// <summary>Connects another client to the same server, for tests that need more than one.</summary>
+    public TestClient AddClient() {
+        var client = new TestClient(new TestWorld(), new LoopbackClient(), port.ToString());
+        extraClients.Add(client);
+        return client;
+    }
+
+    /// <summary>Advances every peer's Riptide pump (which polls the transport in turn) several times over.</summary>
     public void Pump(int rounds = 10) {
         for(var i = 0; i < rounds; i++) {
             Client.Client.Update();
+            foreach(var client in extraClients) {
+                client.Client.Update();
+            }
             Server.Server.Update();
         }
     }
 
     public void Dispose() {
         Client.Client.Disconnect();
+        foreach(var client in extraClients) {
+            client.Client.Disconnect();
+        }
         Server.Server.Stop();
     }
 }
